@@ -16,18 +16,22 @@ BSD license, check license.txt for more information
 All text above, and the splash screen below must be included in any redistribution
 *********************************************************************/
 
+//PORTED for MicroBlaze (SPI and IIC)
+
 #include <sleep.h>
 #include <stdint.h>
 #include <xgpio.h>
 #include <xspi.h>
+#include <XIic_l.h>
 
 #include "Adafruit_GFX.h"
 #include "Adafruit_SSD1306.h"
 
 // the memory buffer for the LCD
+static uint8_t * buffer; //This will point to the second element of buffer_iic
 
-static uint8_t buffer[SSD1306_LCDHEIGHT * SSD1306_LCDWIDTH / 8] = {
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+static uint8_t buffer_iic[(SSD1306_LCDHEIGHT * SSD1306_LCDWIDTH / 8) + 1] = { //Added 0x40 to beginning for SSD1306 IIC Data writes
+0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
@@ -130,6 +134,15 @@ void Adafruit_SSD1306::drawPixel(int16_t x, int16_t y, uint16_t color) {
 
 }
 
+//IIC
+Adafruit_SSD1306::Adafruit_SSD1306(u32 IIC_ADDRESS, XGpio *GPIO, int8_t RST) : Adafruit_GFX(SSD1306_LCDWIDTH, SSD1306_LCDHEIGHT) {
+	gpio = GPIO;
+	rst = RST;
+	spi = NULL;
+	iic_address = IIC_ADDRESS;
+}
+
+//Spi
 Adafruit_SSD1306::Adafruit_SSD1306(XSpi *SPI, XGpio *GPIO, int8_t RST, int8_t DC) : Adafruit_GFX(SSD1306_LCDWIDTH, SSD1306_LCDHEIGHT) {
   spi = SPI;
   gpio = GPIO;
@@ -137,10 +150,14 @@ Adafruit_SSD1306::Adafruit_SSD1306(XSpi *SPI, XGpio *GPIO, int8_t RST, int8_t DC
   dc = DC;
 }
 
-void Adafruit_SSD1306::begin(uint8_t vccstate, uint8_t i2caddr, bool reset) {
+void Adafruit_SSD1306::begin(uint8_t vccstate, uint8_t i2caddr, bool reset) { //i2caddr not used
   _vccstate = vccstate;
+  buffer = &(buffer_iic[1]);
 
-  XGpio_SetDataDirection(gpio, 1, ~(1 << dc | 1 << rst));
+  if (spi)
+	  XGpio_SetDataDirection(gpio, 1, ~(1 << dc | 1 << rst));
+  else
+	  XGpio_SetDataDirection(gpio, 1, ~(1 << rst));
 
   if ((reset) && (rst >= 0)) {
     // Setup reset pin direction (used by both SPI and I2C)
@@ -228,10 +245,19 @@ void Adafruit_SSD1306::invertDisplay(uint8_t i) {
 }
 
 void Adafruit_SSD1306::ssd1306_command(uint8_t c) {
-  XGpio_DiscreteClear(gpio, 1, 1 << dc);
-  (void)XSpi_SetSlaveSelect(spi, 1);
-  (void)XSpi_Transfer(spi, &c, NULL, sizeof(c));
-  (void)XSpi_SetSlaveSelect(spi, 0);
+
+	if (spi) {
+		XGpio_DiscreteClear(gpio, 1, 1 << dc);
+		(void)XSpi_SetSlaveSelect(spi, 1);
+		(void)XSpi_Transfer(spi, &c, NULL, sizeof(c));
+		(void)XSpi_SetSlaveSelect(spi, 0);
+	}
+	else{
+		uint8_t iic_buf[2];
+		iic_buf[0] = 0x00;
+		iic_buf[1] = c;
+		(void)XIic_Send(iic_address,SSD1306_I2C_ADDRESS, iic_buf, sizeof(iic_buf),0);
+	}
 }
 
 // startscrollright
@@ -324,6 +350,7 @@ void Adafruit_SSD1306::dim(bool dim) {
 }
 
 void Adafruit_SSD1306::display(void) {
+
   ssd1306_command(SSD1306_COLUMNADDR);
   ssd1306_command(0);   // Column start address (0 = reset)
   ssd1306_command(SSD1306_LCDWIDTH-1); // Column end address (127 = reset)
@@ -339,11 +366,18 @@ void Adafruit_SSD1306::display(void) {
   #if SSD1306_LCDHEIGHT == 16
     ssd1306_command(1); // Page end address
   #endif
-
-  XGpio_DiscreteSet(gpio, 1, 1 << dc);
-  (void)XSpi_SetSlaveSelect(spi, 1);
-  (void)XSpi_Transfer(spi, buffer, NULL, sizeof(buffer));
-  (void)XSpi_SetSlaveSelect(spi, 0);
+  if(spi){
+	  XGpio_DiscreteSet(gpio, 1, 1 << dc);
+	  (void)XSpi_SetSlaveSelect(spi, 1);
+	  (void)XSpi_Transfer(spi, buffer, NULL, sizeof(buffer));
+	  (void)XSpi_SetSlaveSelect(spi, 0);
+  }
+  else{
+	  //uint8_t iic_buf [(SSD1306_LCDHEIGHT * SSD1306_LCDWIDTH / 8)+1];
+	  //iic_buf[0] = 0x40;
+	  //memcpy(iic_buf+1, buffer, sizeof(buffer));
+	  (void)XIic_Send(iic_address,SSD1306_I2C_ADDRESS, buffer_iic, sizeof(buffer_iic),0);
+  }
 }
 
 // clear everything
